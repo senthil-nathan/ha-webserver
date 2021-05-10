@@ -1,0 +1,502 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  AWS CloudFormation Template for Sitefinity that creates multi-az resources
+
+Parameters:
+
+  Application:
+    Description: Application Name / Purpose
+    Type: String
+    Default: sitefinity
+  
+  Environment:
+    Description: Environment i.e. Production or Non-Production
+    Type: String
+    Default: non-prod
+
+  VpcId:
+    Description: VPC ID from where the stack needs to be launched
+    Type: AWS::EC2::VPC::Id
+    Default: vpc-095f61886bd69c2f5
+
+  SubnetAPublic:
+    Description: Public Availability Zone A Subnet ID
+    Type: String
+    Default: subnet-0afe423cc247ac43f
+
+  SubnetBPublic:
+    Description: Public Availability Zone B Subnet ID
+    Type: String
+    Default: subnet-0a9518cf2347af016
+
+  SubnetAPrivate:
+    Description: Private Availability Zone A Subnet ID
+    Type: String
+    Default: subnet-092c8264460aa7682
+
+  SubnetBPrivate:
+    Description: Private Availability Zone B Subnet ID
+    Type: String
+    Default: subnet-0df22ba4957d54d61
+  
+  InstanceType:
+    Description: SitefinityWebServer EC2 instance type
+    Type: String
+    Default: m4.large
+    AllowedValues:
+      - t2.small
+      - m4.large
+      - m4.xlarge
+      - m4.2xlarge
+      - m4.4xlarge
+    ConstraintDescription: must be a valid EC2 instance type.
+
+  CacheNodeType:
+    Description: Cache node instance class
+    Type: String
+    Default: cache.t2.small
+    ConstraintDescription: Node instance class not supported
+    AllowedValues:
+      - cache.t2.small
+      - cache.t2.medium
+      - cache.m4.large
+
+  CacheNodeCount:
+    Description: Number of nodes in the cluster. Only used with memcached engine, for redis this value will be set to 1.
+    Type: Number
+    MinValue: 1
+    MaxValue: 10
+    ConstraintDescription: Node count must be between 1 and 10
+    Default: 1
+
+  AutoMinorVersionUpgrade:
+    Description: Whether or not minor version upgrades to the cache engine should be applied automatically during the maintenance window.
+    Type: String
+    Default: true
+    AllowedValues:
+      - true
+      - false
+
+  NotificationEmail:
+    Description: EMail address to notify if there are any scaling operations
+    Type: String
+    AllowedPattern: >-
+      ([a-zA-Z0-9_\-\.]+)@((\[[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.)|(([a-zA-Z0-9\-]+\.)+))([a-zA-Z]{2,4}|[0-9]{1,3})(\]?)
+    ConstraintDescription: must be a valid email address.
+    Default: test@example.com
+
+Mappings:
+  AWSInstanceType2Arch:
+    t2.small:
+      Arch: HVM64
+    m4.large:
+      Arch: HVM64
+    m4.xlarge:
+      Arch: HVM64
+    m4.2xlarge:
+      Arch: HVM64
+    m4.4xlarge:
+      Arch: HVM64
+  AWSRegionArch2AMI:
+    ap-southeast-1:
+      HVM64: ami-08569b978cc4dfa10
+    ap-southeast-2:
+      HVM64: ami-09b42976632b27e9b
+  Region2Examples:
+    ap-southeast-1:
+      Examples: https://s3-ap-southeast-1.amazonaws.com/cloudformation-examples-ap-southeast-1
+    ap-southeast-2:
+      Examples: https://s3-ap-southeast-2.amazonaws.com/cloudformation-examples-ap-southeast-2
+
+Resources:
+
+  NotificationTopic:
+    Type: 'AWS::SNS::Topic'
+    Properties:
+      DisplayName: !Sub '${Application}-${Environment}-EmailNotificationTopic'
+      Subscription:
+        - Endpoint:
+            Ref: NotificationEmail
+          Protocol: email
+      Tags: 
+       - Key: Application
+         Value: !Sub ${Application}
+       - Key: Environment
+         Value: !Sub ${Environment}
+       - Key: Name
+         Value: !Sub '${Application}-${Environment}-EmailNotificationTopic'
+
+  InstanceRole: 
+    Type: AWS::IAM::Role
+    Properties: 
+      RoleName: !Sub '${Application}-${Environment}-instance-role'
+      ManagedPolicyArns: 
+        - arn:aws:iam::aws:policy/AmazonRDSDataFullAccess
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement: 
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      Tags: 
+       - Key: Application
+         Value: !Sub ${Application}
+       - Key: Environment
+         Value: !Sub ${Environment}
+       - Key: Name
+         Value: !Sub '${Application}-${Environment}-instance-role'
+
+
+  InstanceProfile: 
+    Type: AWS::IAM::InstanceProfile
+    Properties: 
+      InstanceProfileName: !Sub '${Application}-${Environment}-instance-profile'
+      Path: /
+      Roles: 
+        - 
+          Ref: InstanceRole
+          
+  SitefinityWebServerGroup:
+    Type: 'AWS::AutoScaling::AutoScalingGroup'
+    Properties:
+      AutoScalingGroupName: !Sub '${Application}-${Environment}-asg'
+      VPCZoneIdentifier:
+        - !Ref SubnetAPrivate
+        - !Ref SubnetBPrivate
+      LaunchConfigurationName:
+        Ref: LaunchConfig
+      MinSize: '2'
+      MaxSize: '4'
+      TargetGroupARNs:
+        - Ref: SitefinityTargetGroup
+      Tags: 
+        - Key: Application
+          Value: !Sub ${Application}
+          PropagateAtLaunch: true
+        - Key: Environment
+          Value: !Sub ${Environment}
+          PropagateAtLaunch: true
+        - Key: Name
+          Value: !Sub '${Application}-${Environment}-instance'
+          PropagateAtLaunch: true
+      NotificationConfiguration:
+        TopicARN:
+          Ref: NotificationTopic
+        NotificationTypes:
+          - 'autoscaling:EC2_INSTANCE_LAUNCH'
+          - 'autoscaling:EC2_INSTANCE_LAUNCH_ERROR'
+          - 'autoscaling:EC2_INSTANCE_TERMINATE'
+          - 'autoscaling:EC2_INSTANCE_TERMINATE_ERROR'
+    CreationPolicy:
+      ResourceSignal:
+        Timeout: PT15M
+        Count: '1'
+    UpdatePolicy:
+      AutoScalingRollingUpdate:
+        MinInstancesInService: '1'
+        MaxBatchSize: '1'
+        PauseTime: PT15M
+        WaitOnResourceSignals: 'true'
+        
+  LaunchConfig:
+    Type: 'AWS::AutoScaling::LaunchConfiguration'
+    Metadata:
+      Comment: Install Sitefinity application
+      'AWS::CloudFormation::Init':
+        config:
+          packages:
+            yum:
+              httpd: []
+          files:
+            /var/www/html/index.html:
+              content:
+                'Fn::Join':
+                  - |+
+
+                  - - <img src="
+                    - 'Fn::FindInMap':
+                        - Region2Examples
+                        - Ref: 'AWS::Region'
+                        - Examples
+                    - >-
+                      /cloudformation_graphic.png" alt="AWS CloudFormation
+                      Logo"/>
+                    - >-
+                      <h1>Congratulations, you have successfully launched the
+                      AWS CloudFormation sample.</h1>
+              mode: '000644'
+              owner: root
+              group: root
+            /etc/cfn/cfn-hup.conf:
+              content:
+                'Fn::Join':
+                  - ''
+                  - - |
+                      [main]
+                    - stack=
+                    - Ref: 'AWS::StackId'
+                    - |+
+
+                    - region=
+                    - Ref: 'AWS::Region'
+                    - |+
+
+              mode: '000400'
+              owner: root
+              group: root
+            /etc/cfn/hooks.d/cfn-auto-reloader.conf:
+              content:
+                'Fn::Join':
+                  - ''
+                  - - |
+                      [cfn-auto-reloader-hook]
+                    - |
+                      triggers=post.update
+                    - >
+                      path=Resources.LaunchConfig.Metadata.AWS::CloudFormation::Init
+                    - 'action=/opt/aws/bin/cfn-init -v '
+                    - '         --stack '
+                    - Ref: 'AWS::StackName'
+                    - '         --resource LaunchConfig '
+                    - '         --region '
+                    - Ref: 'AWS::Region'
+                    - |+
+
+                    - |
+                      runas=root
+          services:
+            sysvinit:
+              httpd:
+                enabled: 'true'
+                ensureRunning: 'true'
+              cfn-hup:
+                enabled: 'true'
+                ensureRunning: 'true'
+                files:
+                  - /etc/cfn/cfn-hup.conf
+                  - /etc/cfn/hooks.d/cfn-auto-reloader.conf
+    Properties:
+      ImageId:
+        'Fn::FindInMap':
+          - AWSRegionArch2AMI
+          - Ref: 'AWS::Region'
+          - 'Fn::FindInMap':
+              - AWSInstanceType2Arch
+              - Ref: InstanceType
+              - Arch
+      SecurityGroups:
+        - Ref: InstanceSecurityGroup
+      InstanceType: !Ref InstanceType
+      IamInstanceProfile: !Ref InstanceProfile 
+      UserData:
+        'Fn::Base64':
+          'Fn::Join':
+            - ''
+            - - |
+                #!/bin/bash -xe
+              - |
+                yum update -y aws-cfn-bootstrap
+              - '/opt/aws/bin/cfn-init -v '
+              - '         --stack '
+              - Ref: 'AWS::StackName'
+              - '         --resource LaunchConfig '
+              - '         --region '
+              - Ref: 'AWS::Region'
+              - |+
+
+              - '/opt/aws/bin/cfn-signal -e $? '
+              - '         --stack '
+              - Ref: 'AWS::StackName'
+              - '         --resource SitefinityWebServerGroup '
+              - '         --region '
+              - Ref: 'AWS::Region'
+              - |+
+
+  SitefinityWebServerScaleUpPolicy:
+    Type: 'AWS::AutoScaling::ScalingPolicy'
+    Properties:
+      AdjustmentType: ChangeInCapacity
+      AutoScalingGroupName: !Ref SitefinityWebServerGroup
+      Cooldown: '60'
+      ScalingAdjustment: '1'
+
+  SitefinityWebServerScaleDownPolicy:
+    Type: 'AWS::AutoScaling::ScalingPolicy'
+    Properties:
+      AdjustmentType: ChangeInCapacity
+      AutoScalingGroupName: !Ref SitefinityWebServerGroup
+      Cooldown: '60'
+      ScalingAdjustment: '-1'
+
+  CPUAlarmHigh:
+    Type: 'AWS::CloudWatch::Alarm'
+    Properties:
+      AlarmDescription: Scale-up if CPU > 90% for 10 minutes
+      AlarmName: !Sub '${Application}-${Environment}-alarm'
+      MetricName: CPUUtilization
+      Namespace: AWS/EC2
+      Statistic: Average
+      Period: '300'
+      EvaluationPeriods: '2'
+      Threshold: '90'
+      AlarmActions:
+        - Ref: SitefinityWebServerScaleUpPolicy
+      Dimensions:
+        - Name: AutoScalingGroupName
+          Value:
+            Ref: SitefinityWebServerGroup
+      ComparisonOperator: GreaterThanThreshold
+
+  CPUAlarmLow:
+    Type: 'AWS::CloudWatch::Alarm'
+    Properties:
+      AlarmDescription: Scale-down if CPU < 70% for 10 minutes
+      MetricName: CPUUtilization
+      Namespace: AWS/EC2
+      Statistic: Average
+      Period: '300'
+      EvaluationPeriods: '2'
+      Threshold: '70'
+      AlarmActions:
+        - Ref: SitefinityWebServerScaleDownPolicy
+      Dimensions:
+        - Name: AutoScalingGroupName
+          Value:
+            Ref: SitefinityWebServerGroup
+      ComparisonOperator: LessThanThreshold
+
+  ElasticLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties: 
+      Name: !Sub '${Application}-${Environment}-elb'
+      Type: application
+      IpAddressType: ipv4
+      Subnets: 
+      - Ref: SubnetAPublic
+      - Ref: SubnetBPublic
+      LoadBalancerAttributes: 
+        - Key: routing.http2.enabled
+          Value: true
+      Scheme: internet-facing
+      SecurityGroups: 
+        - Ref: ElasticLoadBalancerSecurityGroup
+      Tags: 
+       - Key: Application
+         Value: !Sub ${Application}
+       - Key: Environment
+         Value: !Sub ${Environment}
+       - Key: Name
+         Value: !Sub '${Application}-${Environment}-elb'
+
+  SitefinityTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      VpcId: !Ref VpcId
+      Protocol: HTTP
+      Port: 80
+
+  LoadBalancerListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref ElasticLoadBalancer
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - TargetGroupArn: !Ref SitefinityTargetGroup
+          Type: forward
+
+  ElasticLoadBalancerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allows connections from anywhere to elb
+      GroupName: !Sub '${Application}-${Environment}-elb-sg'
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+      Tags: 
+        - Key: Application
+          Value: !Sub ${Application}
+        - Key: Environment
+          Value: !Sub ${Environment}
+        - Key: Name
+          Value: !Sub '${Application}-${Environment}-elb-sg'
+
+  InstanceSecurityGroup:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      GroupDescription: Enable HTTP access from the load balancer
+      GroupName: !Sub '${Application}-${Environment}-instance-sg'
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: '80'
+          ToPort: '80'
+          SourceSecurityGroupId: !Ref ElasticLoadBalancerSecurityGroup
+      Tags: 
+        - Key: Application
+          Value: !Sub ${Application}
+        - Key: Environment
+          Value: !Sub ${Environment}
+        - Key: Name
+          Value: !Sub '${Application}-${Environment}-instance-sg'
+
+  ElastiCacheSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allows connections from Sitefinity webserver instances to ElastiCache Security Group
+      GroupName: !Sub '${Application}-${Environment}-elasticcache-sg'
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: '6379'
+          ToPort: '6379'
+          SourceSecurityGroupId: !Ref InstanceSecurityGroup
+      Tags:
+        - Key: Application
+          Value: !Sub ${Application}
+        - Key: Environment
+          Value: !Sub ${Environment}
+        - Key: Name
+          Value: !Sub '${Application}-${Environment}-elasticcache-sg'
+
+  ElastiCacheSubnetGroup:
+    Type: AWS::ElastiCache::SubnetGroup
+    Properties:
+      Description: Cache Subnet Group
+      SubnetIds:
+        - Ref: SubnetAPrivate
+        - Ref: SubnetBPrivate
+
+  ElastiCacheCluster:
+    Type: AWS::ElastiCache::CacheCluster
+    Properties:
+      AutoMinorVersionUpgrade: !Ref AutoMinorVersionUpgrade
+      Engine: Redis
+      CacheNodeType: !Ref CacheNodeType
+      ClusterName : !Sub '${Application}-${Environment}-ElastiCacheCluster'
+      NumCacheNodes: !Ref CacheNodeCount
+      CacheSubnetGroupName: !Ref ElastiCacheSubnetGroup
+      VpcSecurityGroupIds:
+        - !GetAtt ElastiCacheSecurityGroup.GroupId
+      Tags:
+        - Key: Application
+          Value: !Sub ${Application}
+        - Key: Environment
+          Value: !Sub ${Environment}
+        - Key: Name
+          Value: !Sub '${Application}-${Environment}-ElastiCacheCluster'
+
+Outputs:
+  URL:
+    Description: The URL of the website
+    Value:
+      'Fn::Join':
+        - ''
+        - - 'http://'
+          - 'Fn::GetAtt':
+              - ElasticLoadBalancer
+              - DNSName
